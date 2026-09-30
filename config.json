@@ -1,0 +1,50 @@
+{
+  "workers": 64,
+  "max_in_flight": 128,
+  "handshake_timeout": 1.5,
+  "probe_count": 5,
+  "rate": 150.0,
+  "cooldown": 300,
+  "failure_threshold": 3,
+  "tcp_ports": [
+    443,
+    80,
+    8080,
+    8443
+  ],
+  "https_port": 443,
+  "advanced_valid": 20,
+  "advanced_max_candidates": 4096,
+  "advanced_timeout": 1.0,
+  "cf_max_candidates": 20000,
+  "quality_probe_limit": 25,
+  "score_weights": {
+    "loss": 30.0,
+    "latency": 20.0,
+    "jitter": 15.0,
+    "speed": 15.0,
+    "reliability": 10.0,
+    "service": 10.0
+  },
+  "cdn_max_candidates": 20000,
+  "lan_share_proxy": false,
+  "xray_tun_name": "spider-tun0",
+  "xray_tun_mtu": 1500,
+  "xray_ping_providers": [
+    {
+      "name": "Cloudflare",
+      "host": "1.1.1.1",
+      "port": 443
+    },
+    {
+      "name": "Google",
+      "host": "8.8.8.8",
+      "port": 443
+    },
+    {
+      "name": "Quad9",
+      "host": "9.9.9.9",
+      "port": 443
+    }
+  ]
+}

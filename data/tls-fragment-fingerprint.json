@@ -1,0 +1,32 @@
+{
+  "apiVersion": "spiderpanel.plugin/v1",
+  "id": "tls-fragment-fingerprint",
+  "name": "TLS fragment + fingerprint",
+  "description": "Automatically adds fingerprint (fp), cipher suites (cs) and fragment mask (fm) to every TLS config — matches Proxy Builder's Fragment+Fingerprint tool.",
+  "details": [
+    "Works ONLY on configs with `security=tls` (VLESS/Trojan TLS/WSS). Reality and non-TLS configs are untouched.",
+    "Three controls apply to the generated config string:",
+    "  - fp : TLS fingerprint sent by the client (default: unsafe)",
+    "  - cs : colon-separated cipher suite list (optional — leave empty to skip)",
+    "  - fm : xray fragment mask as JSON (optional — leave empty to skip)",
+    "",
+    "This is the same logic as the Proxy Builder's 'Fragment + Fingerprint' tool, but applied automatically at runtime.",
+    "",
+    "How to build fm: copy the exact JSON output from Proxy Builder → Fragment+tab → paste it into `fm` below."
+  ],
+  "version": "1.0.0",
+  "author": "spiderpanel",
+  "enabledByDefault": false,
+  "hooks": {
+    "config": [
+      {
+        "match": { "security": "tls" },
+        "set": {
+          "fp": "unsafe",
+          "cs": "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256:TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256",
+          "fm": "{\"tcp\": [{\"type\": \"fragment\", \"settings\": {\"packets\": \"tlshello\", \"lengths\": [\"0\", \"104\", \"1\"], \"delays\": [\"0\"], \"maxSplit\": \"0\"}}, {\"type\": \"fragment\", \"settings\": {\"packets\": \"1-1\", \"lengths\": [\"114\", \"1\"], \"delays\": [\"1\"], \"maxSplit\": \"11\"}}]}"
+        }
+      }
+    ]
+  }
+}

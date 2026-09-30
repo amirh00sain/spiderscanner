@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" role="img" aria-label="Spider Network Scanner">
+<defs>
+ <linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#0b0d12"/><stop offset="1" stop-color="#151a22"/></linearGradient>
+</defs>
+<rect width="1200" height="420" rx="36" fill="url(#g)"/>
+<rect x="40" y="40" width="1120" height="340" rx="28" fill="none" stroke="#2d3542"/>
+<image href="logo.svg" x="170" y="52" width="860" height="165" preserveAspectRatio="xMidYMid meet"/>
+<text x="600" y="275" text-anchor="middle" fill="#f5f7ff" font-size="42" font-family="Inter,Arial,sans-serif" font-weight="700">SPIDER NETWORK SCANNER</text>
+<text x="600" y="318" text-anchor="middle" fill="#9da8b8" font-size="22" font-family="Inter,Arial,sans-serif">Cloudflare • Railway • Advanced Config • DPI • Quality Scoring</text>
+</svg>

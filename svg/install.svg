@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 260" role="img" aria-label="Spider install command">
+<rect width="1200" height="260" rx="30" fill="#0b0d12"/>
+<rect x="32" y="32" width="1136" height="196" rx="22" fill="#11151c" stroke="#2d3542"/>
+<circle cx="64" cy="65" r="7" fill="#7ee787"/><circle cx="89" cy="65" r="7" fill="#f2cc60"/><circle cx="114" cy="65" r="7" fill="#ff7b72"/>
+<text x="58" y="132" fill="#7ee787" font-size="26" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">$</text>
+<text x="84" y="132" fill="#f5f7ff" font-size="26" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">curl -fsSL https://raw.githubusercontent.com/amirh00sain/spiderscanner/main/install.sh | bash</text>
+<text x="58" y="185" fill="#9da8b8" font-size="22" font-family="Inter,Arial,sans-serif">Then run: spider</text>
+</svg>
