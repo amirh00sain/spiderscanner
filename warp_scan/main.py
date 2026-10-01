@@ -364,8 +364,9 @@ def _score_result(row,cfg):
     if row.get('status') not in ('verified','connected'):
         row['score']=0.0; return 0.0
     weights=dict(cfg.get('score_weights') or {'loss':30.0,'latency':20.0,'jitter':15.0,'speed':15.0,'reliability':10.0,'service':10.0})
+    packet_loss=row.get('packet_loss')
     vals={
-        'loss':_higher_is_better(100.0-float(row.get('packet_loss',100.0)),0,100),
+        'loss':None if packet_loss is None else _higher_is_better(100.0-float(packet_loss),0,100),
         'latency':_lower_is_better(row.get('median_rtt_ms',row.get('rtt_ms')),15.0,350.0,1.20),
         'jitter':_lower_is_better(row.get('jitter_ms'),2.0,120.0,1.10),
         'speed':row.get('speed_score'),
@@ -597,36 +598,65 @@ def https_transfer_probe(ip,port=443,timeout=4.0,target_bytes=262144):
         return None
 
 
-def add_packet_loss(results,probe_fn,state,*,limit=None,speed_probe=None):
-    """Measure repeated latency, packet loss, jitter, reliability and optional throughput."""
+def add_packet_loss(results,probe_fn,state,*,limit=None,speed_probe=None,stop=None):
+    """Measure quality with an interruptible, bounded second pass.
+
+    When Q/Ctrl+C stops the main scan, do not start another long quality pass.
+    Instead, score the endpoints using the metrics already known from the
+    successful connection probe (latency + service), so the results table can
+    be rendered immediately and the caller can return to its menu.
+    """
     if not results: return results
+    stopped = bool(stop is not None and stop.event.is_set())
     attempts=max(3,int(state.cfg.get('probe_count',5)))
     visible=max(1,int(limit if limit is not None else state.cfg.get('quality_probe_limit',25)))
     ranked=sorted(results,key=lambda x:(-x.get('score',0),x.get('rtt_ms',999999)))
+
+    # Q during the live scan must be a true stop: no post-scan network work.
+    if stopped:
+        for row in ranked:
+            row.setdefault('packet_loss', None)
+            row.setdefault('jitter_ms', None)
+            row.setdefault('speed_mbps', None)
+            row.setdefault('reliability_score', None)
+            row['score_mode'] = 'partial'
+            _score_result(row,state.cfg)
+        return sorted(results,key=lambda x:(-x.get('score',0),x.get('median_rtt_ms',x.get('rtt_ms',999999))))
+
     timeout=float(state.cfg.get('advanced_timeout',1.0))
     for row in ranked[:visible]:
-        ip=row.get('ip'); port=int(row.get('port',443)); ok_count=0; rtts=[]
+        if stop is not None and stop.event.is_set():
+            break
+        ip=row.get('ip'); port=int(row.get('port',443)); ok_count=0; attempted=0; rtts=[]
         for _ in range(attempts):
+            if stop is not None and stop.event.is_set():
+                break
+            attempted += 1
             try: ok,rtt=probe_fn(ip,port,timeout)
             except Exception: ok,rtt=False,None
             if ok:
                 ok_count+=1
                 if rtt is not None: rtts.append(float(rtt))
+        # An interrupt during a row should leave what we already measured,
+        # rather than launching speed tests after the user asked to stop.
         if not rtts and row.get('rtt_ms') is not None: rtts=[float(row['rtt_ms'])]
-        row['attempts']=attempts; row['success_count']=ok_count
-        row['packet_loss']=round(100.0*(attempts-ok_count)/attempts,2)
+        measured_attempts=max(1, attempted if (stop is not None and stop.event.is_set()) else attempts)
+        row['attempts']=measured_attempts; row['success_count']=ok_count
+        row['packet_loss']=round(100.0*(measured_attempts-ok_count)/measured_attempts,2) if measured_attempts else None
         if rtts:
             row['rtt_ms']=round(statistics.median(rtts),2)
             row['median_rtt_ms']=row['rtt_ms']
             row['min_rtt_ms']=round(min(rtts),2)
             row['jitter_ms']=round(_jitter_from_samples(rtts),2)
-        row['reliability_score']=round(100.0*ok_count/attempts,2)
-        if speed_probe is not None and ok_count:
+        row['reliability_score']=round(100.0*ok_count/max(1,measured_attempts),2)
+        if speed_probe is not None and ok_count and not (stop is not None and stop.event.is_set()):
             try: speed=speed_probe(ip,port,max(3.0,timeout*3.0))
             except Exception: speed=None
             if speed is not None and speed>0: row['speed_mbps']=round(float(speed),3)
         _score_result(row,state.cfg)
-    _speed_scores(results)
+
+    if not (stop is not None and stop.event.is_set()):
+        _speed_scores(results)
     for row in results: _score_result(row,state.cfg)
     return sorted(results,key=lambda x:(-x.get('score',0),x.get('median_rtt_ms',x.get('rtt_ms',999999))))
 
@@ -685,11 +715,16 @@ def scan_range(net,kind,state,ports=None,order="ordered",limit=0,stop=None,targe
             print(f"\n[!] Scan stopped — verified={len(results)}", flush=True)
         else:
             print(f"\nScan complete — probes={finished}/{submitted}, verified={len(results)}, time={time.time()-started:.1f}s", flush=True)
-        try: stop.close()
-        except Exception: pass
+
     ranked=sorted(results,key=lambda x:x.get("rtt_ms",999999))
     speed_probe=https_transfer_probe if any(int(r.get("port",0))==443 for r in ranked) else None
-    return add_packet_loss(ranked,fn,state,speed_probe=speed_probe)
+    try:
+        return add_packet_loss(ranked,fn,state,speed_probe=speed_probe,stop=stop)
+    finally:
+        # Keep the Q watcher alive through the quality pass, then restore the
+        # terminal and terminate the watcher once the results are ready.
+        try: stop.close()
+        except Exception: pass
 
 def print_result(e):
     print(f"  ✓ {e.ip}:{e.port:<5} {e.median_rtt_ms:7.1f}ms loss={e.packet_loss:5.1f}% score={e.score:5.1f}")
@@ -1075,6 +1110,9 @@ def ui_result_table(results,title='Results',limit=25):
         if RICH_OK: console.print(Panel('No verified results.',title=title,border_style='yellow'))
         else: print('\nNo verified results.')
         return
+    partial=any(r.get('score_mode')=='partial' for r in results)
+    if partial:
+        title += ' — partial scores (stopped early)'
     rows=results[:limit]
     if RICH_OK:
         t=Table(title=title,show_lines=False)
@@ -1082,7 +1120,9 @@ def ui_result_table(results,title='Results',limit=25):
             t.add_column(col,justify='right' if col!='IP' else 'left')
         for i,r in enumerate(rows,1):
             def fmt(k,suffix=''):
-                v=r.get(k,'—'); return f'{v:.1f}{suffix}' if isinstance(v,(int,float)) else str(v)
+                v=r.get(k,'—')
+                if v is None: return '—'
+                return f'{v:.1f}{suffix}' if isinstance(v,(int,float)) else str(v)
             t.add_row(str(i),str(r.get('ip','')),str(r.get('port','')),fmt('median_rtt_ms'),fmt('jitter_ms'),fmt('packet_loss','%'),fmt('speed_mbps'),fmt('score'))
         console.print(t)
     else:
@@ -1228,8 +1268,12 @@ CONNECT_STATE_FILE = HOME / "connect.json"
 XRAY_CONFIG_DIR = HOME / "xray"
 XRAY_CONFIG_FILE = XRAY_CONFIG_DIR / "config.json"
 AETHER_CONFIG_DIR = HOME / "aether"
+AETHER_SCRIPT = AETHER_ROOT / "aether.sh"
 AETHER_LOG = HOME / "aether.log"
 XRAY_LOG = HOME / "xray.log"
+SNI_SPOOF_PROXY = CONNECT_ROOT / "sni-spoof" / "spoof_proxy.py"
+SNI_SPOOF_LISTEN_HOST = "127.0.0.1"
+SNI_SPOOF_LISTEN_PORT = 40443
 CONNECT_PROC = {}
 
 
@@ -1317,17 +1361,27 @@ def aether_binary():
 
 
 def ensure_aether_ready():
-    # Spider ships a prebuilt Linux x86_64 Aether distribution.  Do not compile
-    # Rust/C++ at install or first-run time.
+    # Aether is launched through the bundled ./aether.sh wrapper.
     if os.name == 'posix' and hasattr(os, 'uname') and os.uname().machine not in ('x86_64', 'amd64'):
         raise RuntimeError(f"Bundled Aether is Linux x86_64 only; detected {os.uname().machine}. Use a matching Aether build for this architecture.")
-    # Rust/C++ at install or first-run time: the binary and its PT helpers live
-    # under connect/aether/ and are copied verbatim by install.sh.
-    b=aether_binary()
-    if b: return b
-    raise FileNotFoundError(
-        "Bundled Aether binary is missing. Expected connect/aether/aether (Linux x86_64)."
-    )
+    if not AETHER_SCRIPT.is_file():
+        raise FileNotFoundError(f"Aether launcher is missing. Expected {AETHER_SCRIPT}")
+    if AETHER_BUILD.is_file():
+        try:
+            os.chmod(AETHER_BUILD, 0o755)
+        except Exception:
+            pass
+    if not aether_binary():
+        installed=shutil.which('aether')
+        if not installed:
+            raise FileNotFoundError(
+                "Bundled Aether binary is missing. Expected connect/aether/aether (Linux x86_64)."
+            )
+    try:
+        os.chmod(AETHER_SCRIPT, 0o755)
+    except Exception:
+        pass
+    return AETHER_SCRIPT
 
 
 def load_json_config_text(text):
@@ -1388,7 +1442,7 @@ def xray_binary():
     return Path(found) if found else None
 
 
-def start_background_process(name,cmd,log_file,*,use_sudo=False,env=None):
+def start_background_process(name,cmd,log_file,*,use_sudo=False,env=None,cwd=None):
     if name in CONNECT_PROC and CONNECT_PROC[name].poll() is None:
         raise RuntimeError(f"{name} is already running (PID {CONNECT_PROC[name].pid})")
     log_file.parent.mkdir(parents=True,exist_ok=True)
@@ -1399,7 +1453,7 @@ def start_background_process(name,cmd,log_file,*,use_sudo=False,env=None):
         if not sudo:
             f.close(); raise RuntimeError('TUN mode needs root or sudo; sudo was not found.')
         actual=[sudo]+actual
-    proc=subprocess.Popen(actual,stdin=subprocess.DEVNULL,stdout=f,stderr=subprocess.STDOUT,start_new_session=True,env=env)
+    proc=subprocess.Popen(actual,stdin=subprocess.DEVNULL,stdout=f,stderr=subprocess.STDOUT,start_new_session=True,env=env,cwd=str(cwd) if cwd else None)
     CONNECT_PROC[name]=(proc,f)
     time.sleep(0.4)
     if proc.poll() is not None:
@@ -1434,31 +1488,29 @@ def process_status(name):
 
 
 def start_aether(state):
-    b=ensure_aether_ready()
+    script=ensure_aether_ready()
     if port_in_use(*split_bind(proxy_bind(state))):
-        raise RuntimeError(f"Port 1819 is already in use. Stop the existing proxy before starting Aether.")
+        raise RuntimeError("Port 1819 is already in use. Stop the existing proxy before starting Aether.")
     AETHER_CONFIG_DIR.mkdir(parents=True,exist_ok=True)
+    bind=proxy_bind(state)
     env=os.environ.copy()
-    # Aether locates its optional PT helpers (lyrebird/psiphon) next to the
-    # executable or on PATH.  Keep the bundled directory first so the shipped
-    # versions are used even when the user's system has different copies.
     env.update({
+        'AETHER_BIND':bind,
+        'AETHER_SOCKS':bind,
+        'AETHER_CONFIG':str(AETHER_CONFIG_DIR/'aether.toml'),
         'AETHER_PROTOCOL':'masque',
         'AETHER_SCAN':'balanced',
         'AETHER_QUICK_RECONNECT':'1',
-        'AETHER_SOCKS':proxy_bind(state),
         'PATH':str(AETHER_ROOT)+os.pathsep+str(AETHER_ROOT/'pt')+os.pathsep+env.get('PATH',''),
     })
-    cmd=[str(b),'--masque','--scan','balanced','--bind',proxy_bind(state)]
-    # Aether keeps identity under its config directory when explicitly set.
-    config_path=AETHER_CONFIG_DIR/'aether.toml'
-    cmd += ['--config',str(config_path)]
-    old=os.environ.copy(); os.environ.update(env)
-    try:
-        return start_background_process('aether',cmd,AETHER_LOG)
-    finally:
-        os.environ.clear(); os.environ.update(old)
-
+    # Execute the bundled launcher as ./aether.sh from its own directory.
+    return start_background_process(
+        'aether',
+        ['./aether.sh'],
+        AETHER_LOG,
+        env=env,
+        cwd=AETHER_ROOT,
+    )
 
 def xray_load_base():
     if not XRAY_CONFIG_FILE.is_file(): return None
@@ -1587,7 +1639,31 @@ def _get_profile_security(outbound):
     return str(ss.get('security') or 'none').lower()
 
 
-def _apply_sni_spoof(profile, ip, fake_sni):
+def _set_profile_server_endpoint(outbound, host, port):
+    proto=str(outbound.get('protocol','')).lower()
+    settings=outbound.setdefault('settings',{})
+    if proto in ('vless','vmess'):
+        vnext=settings.get('vnext') or []
+        if not vnext:
+            raise ValueError(f'{proto.upper()} outbound has no vnext server')
+        vnext[0]['address']=host
+        vnext[0]['port']=int(port)
+        return
+    if proto in ('trojan','shadowsocks'):
+        servers=settings.get('servers') or []
+        if not servers:
+            raise ValueError(f'{proto.title()} outbound has no server')
+        servers[0]['address']=host
+        servers[0]['port']=int(port)
+        return
+    if proto=='hysteria':
+        settings['address']=host
+        settings['port']=int(port)
+        return
+    raise ValueError(f'Protocol {proto} is not supported by SNI Spoof')
+
+
+def _apply_sni_spoof(profile, ip, fake_sni, *, local_endpoint=False, local_port=SNI_SPOOF_LISTEN_PORT):
     ob=copy.deepcopy(profile.get('outbound') or {})
     proto=str(ob.get('protocol','')).lower()
     if proto not in {'vless','vmess','trojan','shadowsocks','hysteria'}:
@@ -1595,23 +1671,74 @@ def _apply_sni_spoof(profile, ip, fake_sni):
     security=_get_profile_security(ob)
     if security not in ('tls','reality'):
         raise ValueError(f'{proto.upper()} config must use TLS or REALITY for SNI Spoof (current security: {security}).')
+
     original_host=_profile_target_host(profile)
+    original_port=int(profile.get('port') or 443)
     ss=ob.setdefault('streamSettings',{})
+
     if security=='tls':
         tls=ss.setdefault('tlsSettings',{})
-        original_verify=(tls.get('verifyPeerCertByName') or tls.get('serverName') or
-                         (original_host if original_host and not _looks_like_ip(original_host) else ''))
+        # Fake SNI is generated by Xray and sent as the ClientHello serverName.
         tls['serverName']=fake_sni
-        if original_verify and not _looks_like_ip(str(original_verify)):
-            tls['verifyPeerCertByName']=str(original_verify)
         ss['tlsSettings']=tls
     else:
         reality=ss.setdefault('realitySettings',{})
         reality['serverName']=fake_sni
         ss['realitySettings']=reality
-    _set_profile_server_ip(ob,ip)
-    return {**profile,'outbound':ob,'host':ip,'port':profile.get('port'),'spoof_sni':fake_sni,'original_host':original_host}
 
+    if local_endpoint:
+        # Requested runtime endpoint: Xray -> 127.0.0.1:40443.
+        _set_profile_server_endpoint(ob, SNI_SPOOF_LISTEN_HOST, local_port)
+        host=SNI_SPOOF_LISTEN_HOST
+        port=int(local_port)
+    else:
+        # Auto-scan probes still use direct Xray endpoints; the selected pair
+        # is converted to the fixed local spoof relay when actually connected.
+        _set_profile_server_endpoint(ob, ip, original_port)
+        host=str(ip)
+        port=original_port
+
+    return {
+        **profile,
+        'outbound':ob,
+        'host':host,
+        'port':port,
+        'spoof_sni':fake_sni,
+        'spoof_ip':str(ip),
+        'spoof_target_ip':str(ip),
+        'spoof_target_port':original_port,
+        'original_host':original_host,
+        'original_port':original_port,
+    }
+
+
+def _start_sni_proxy(ip, port=443):
+    if not SNI_SPOOF_PROXY.is_file():
+        raise FileNotFoundError(f'SNI Spoof proxy is missing: {SNI_SPOOF_PROXY}')
+    if process_status('sni-spoof-proxy')[0]=='running':
+        stop_background_process('sni-spoof-proxy')
+    if port_in_use(SNI_SPOOF_LISTEN_HOST,SNI_SPOOF_LISTEN_PORT):
+        raise RuntimeError(f'SNI Spoof local port {SNI_SPOOF_LISTEN_PORT} is already in use.')
+
+    cmd=[
+        sys.executable,
+        '-u',
+        str(SNI_SPOOF_PROXY),
+        '--listen',f'{SNI_SPOOF_LISTEN_HOST}:{SNI_SPOOF_LISTEN_PORT}',
+        '--target', (f'[{ip}]:{int(port)}' if ':' in str(ip) else f'{ip}:{int(port)}'),
+    ]
+    proc=start_background_process('sni-spoof-proxy',cmd,HOME/'sni-spoof-proxy.log')
+
+    deadline=time.time()+2.0
+    while time.time()<deadline:
+        if port_in_use(SNI_SPOOF_LISTEN_HOST,SNI_SPOOF_LISTEN_PORT):
+            return proc
+        if proc.poll() is not None:
+            raise RuntimeError(f'SNI Spoof proxy exited; see {HOME / "sni-spoof-proxy.log"}')
+        time.sleep(0.05)
+
+    stop_background_process('sni-spoof-proxy')
+    raise RuntimeError('SNI Spoof proxy did not start listening on 127.0.0.1:40443')
 
 def _single_profile_parsed(parsed, profile):
     base=copy.deepcopy(parsed.get('base') or {})
@@ -1654,7 +1781,7 @@ def _probe_sni_batch(state, profile, pairs, base=None):
     if not b: raise FileNotFoundError('Bundled Xray binary is missing')
     prepared=[]; used_ports=set()
     for idx,(ip,fake_sni) in enumerate(pairs):
-        p=_apply_sni_spoof(profile,ip,fake_sni)
+        p=_apply_sni_spoof(profile,ip,fake_sni,local_endpoint=False)
         port=None
         for _ in range(64):
             candidate=_find_free_port(start=23000+(idx%8)*40,span=40)
@@ -1721,14 +1848,45 @@ def _auto_sni_spoof_find(state, profile, base=None):
 def _start_sni_spoof_connection(state, parsed, profile, ip, fake_sni, label='custom'):
     if process_status('xray')[0]=='running':
         _stop_xray_watcher(state); stop_background_process('xray')
-    spoofed=_apply_sni_spoof(profile,ip,fake_sni)
+    original_port=int(profile.get('port') or 443)
+
+    # Requested chain:
+    #   Xray outbound server = 127.0.0.1
+    #   Xray outbound port   = 40443
+    #   local relay target   = selected spoof IP:original_port
+    #   TLS/REALITY SNI      = fake_sni
+    _start_sni_proxy(ip,original_port)
+    spoofed=_apply_sni_spoof(
+        profile,ip,fake_sni,
+        local_endpoint=True,
+        local_port=SNI_SPOOF_LISTEN_PORT,
+    )
     spoof_parsed=_single_profile_parsed(parsed,spoofed)
-    state.cfg['sni_spoof_active']={'ip':ip,'sni':fake_sni,'mode':label,'started_at':time.time(),'tag':spoofed.get('tag','')}
+    state.cfg['sni_spoof_active']={
+        'ip':str(ip),
+        'port':original_port,
+        'sni':fake_sni,
+        'mode':label,
+        'local_server':SNI_SPOOF_LISTEN_HOST,
+        'local_port':SNI_SPOOF_LISTEN_PORT,
+        'started_at':time.time(),
+        'tag':spoofed.get('tag',''),
+    }
     state.save()
-    proc,sess=start_xray_multi(state,'proxy',spoof_parsed)
+    try:
+        proc,sess=start_xray_multi(state,'proxy',spoof_parsed)
+    except Exception:
+        stop_background_process('sni-spoof-proxy')
+        raise
     if sess:
-        sess[0]['spoof_sni']=fake_sni; sess[0]['original_host']=profile.get('host'); sess[0]['spoof_ip']=ip; sess[0]['sni_spoof_mode']=label
-        state.cfg['xray_session']['profiles']=sess; state.save()
+        sess[0]['spoof_sni']=fake_sni
+        sess[0]['original_host']=profile.get('host')
+        sess[0]['spoof_ip']=str(ip)
+        sess[0]['spoof_port']=original_port
+        sess[0]['spoof_proxy']=f'{SNI_SPOOF_LISTEN_HOST}:{SNI_SPOOF_LISTEN_PORT}'
+        sess[0]['sni_spoof_mode']=label
+        state.cfg['xray_session']['profiles']=sess
+        state.save()
     return proc,sess
 
 
@@ -2187,7 +2345,7 @@ def render_xray_session(state):
             status=str(p.get('status','?'))
             server=str(p.get('host') or '—')
             title=f"#{i:02d}  {p.get('kind','?')}  —  {p.get('tag','')}"
-            spoof_line=(f"\nSpoof: {p.get('spoof_ip')}  |  SNI: {p.get('spoof_sni')}" if p.get('spoof_sni') else '')
+            spoof_line=(f"\nSpoof: {p.get('spoof_ip')}:{p.get('spoof_port') or 443}  |  SNI: {p.get('spoof_sni')}  |  Local: {p.get('spoof_proxy') or '127.0.0.1:40443'}" if p.get('spoof_sni') else '')
             body=(f"Server: {server}:{p.get('port') or '—'}\n"
                   f"Ping: {ping}   |   Jitter: {jit}   |   Loss: {loss}   |   Status: {status}"+spoof_line)
             console.print(Panel(body,title=title,border_style='green' if status=='CONNECTED' else 'yellow' if status=='starting' else 'red'))
@@ -2199,7 +2357,8 @@ def render_xray_session(state):
             loss='—' if p.get('loss') is None else f"{float(p['loss']):.1f}%"
             print(f"\n[{i:02d}] {p.get('kind','?')} — {p.get('tag','')}")
             print(f"  Server: {p.get('host') or '—'}:{p.get('port') or '—'}")
-            if p.get('spoof_sni'): print(f"  Spoof: {p.get('spoof_ip')} | SNI: {p.get('spoof_sni')}")
+            if p.get('spoof_sni'):
+                print(f"  Spoof: {p.get('spoof_ip')}:{p.get('spoof_port') or 443} | SNI: {p.get('spoof_sni')} | Local: {p.get('spoof_proxy') or '127.0.0.1:40443'}")
             print(f"  Ping: {ping} | Jitter: {jit} | Loss: {loss} | Status: {p.get('status','?')}")
         print('\n+---------------- Xray log (last 3 lines) ----------------+')
         for x in _tail_lines(XRAY_LOG,3): print('| '+x[:52].ljust(52)+' |')
@@ -2257,6 +2416,7 @@ def xray_menu(state):
                 for name in list(CONNECT_PROC):
                     if name.startswith('xray-ssh-'): stop_background_process(name)
                 stop_background_process('sni-spoof-scan')
+                stop_background_process('sni-spoof-proxy')
                 print('Xray stopped.' if stopped else 'Xray is not tracked as running.'); ui_pause()
             elif c=='0': return
         except KeyboardInterrupt:
@@ -2479,6 +2639,29 @@ def _diag_speed():
     return res
 
 
+def _diag_waiting(label, fn, *args, **kwargs):
+    """Run a diagnostic stage while showing a live elapsed-seconds Waiting counter."""
+    started=time.monotonic()
+    stop=Event()
+
+    def ticker():
+        while not stop.wait(1.0):
+            elapsed=int(time.monotonic()-started)
+            print(f"\rWaiting {elapsed}s — {label}...", end='', flush=True)
+
+    print(f"Waiting 0s — {label}...", end='', flush=True)
+    thread=Thread(target=ticker, daemon=True)
+    thread.start()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        stop.set()
+        thread.join(timeout=0.2)
+        elapsed=int(time.monotonic()-started)
+        print(f"\r{' ' * 100}\r", end='', flush=True)
+        print(f"✓ {label} ({elapsed}s)")
+
+
 def run_full_diagnostics(state):
     ui_clear(); ui_header(state,'DIAG — FULL INTERNET TEST')
     print('Testing protocols, IP stacks, DNS/UDP, important sites, latency/loss/jitter and bandwidth.')
@@ -2495,18 +2678,28 @@ def run_full_diagnostics(state):
             except Exception: samples.append(None)
         good=[x for x in samples if x is not None]
         return name,host,port,good
-    with ThreadPoolExecutor(max_workers=3) as ex: tcp_rows=list(ex.map(tcp_target,tcp_targets))
+    def _tcp_stage():
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            return list(ex.map(tcp_target,tcp_targets))
+    tcp_rows=_diag_waiting('TCP', _tcp_stage)
     tcp_ok=sum(1 for _,_,_,g in tcp_rows if g)
     all_tcp=[x for _,_,_,g in tcp_rows for x in g]
     result['protocols']['TCP']={'ok':tcp_ok>0,'success':tcp_ok,'total':len(tcp_rows),'rtt':statistics.median(all_tcp) if all_tcp else None,'loss':100*(len(tcp_rows)-tcp_ok)/len(tcp_rows)}
 
-    with ThreadPoolExecutor(max_workers=3) as ex: udp=[(n,h,r) for (n,h),r in zip(DIAG_DNS,ex.map(lambda x:_repeated_udp_dns(x[1],3,1.0),DIAG_DNS))]
+    def _udp_stage():
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            vals=list(ex.map(lambda x:_repeated_udp_dns(x[1],3,1.0),DIAG_DNS))
+        return [(n,h,r) for (n,h),r in zip(DIAG_DNS, vals)]
+    udp=_diag_waiting('UDP / DNS', _udp_stage)
     udp_ok=sum(1 for _,_,r in udp if r['ok'])
     good_udp=[r['rtt'] for _,_,r in udp if r['rtt'] is not None]
     result['protocols']['UDP']={'ok':udp_ok>0,'success':udp_ok,'total':len(udp),'rtt':statistics.median(good_udp) if good_udp else None,'loss':sum(r['loss'] for _,_,r in udp)/len(udp)}
 
     http_targets=['example.com','neverssl.com','httpforever.com']
-    with ThreadPoolExecutor(max_workers=3) as ex: http_rows=list(ex.map(lambda h:_http_probe(h,'http',2),http_targets))
+    def _http_stage():
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            return list(ex.map(lambda h:_http_probe(h,'http',2),http_targets))
+    http_rows=_diag_waiting('HTTP', _http_stage)
     result['protocols']['HTTP']={'ok':any(x['ok'] for x in http_rows),'success':sum(x['ok'] for x in http_rows),'total':len(http_rows),'rtt':statistics.median([x['rtt'] for x in http_rows if x['rtt'] is not None]) if any(x['rtt'] for x in http_rows) else None,'loss':100*sum(not x['ok'] for x in http_rows)/len(http_rows)}
 
     # Run HTTPS/site checks concurrently; network timeouts must not serialize the entire diagnostic.
@@ -2517,18 +2710,20 @@ def run_full_diagnostics(state):
         http=_http_probe(host,'http',3)
         return {'name':label,'host':host,'ipv4':dual['ipv4'],'ipv6':dual['ipv6'],'https':https,'http':http}
 
-    with ThreadPoolExecutor(max_workers=min(18,len(DIAG_SITES))) as ex: 
-        site_results=list(ex.map(site_probe,DIAG_SITES))
+    def _sites_stage():
+        with ThreadPoolExecutor(max_workers=min(18,len(DIAG_SITES))) as ex:
+            return list(ex.map(site_probe,DIAG_SITES))
+    site_results=_diag_waiting('HTTPS / sites', _sites_stage)
     result['sites']=site_results
 
     https_probe_rows=[x['https'] for x in site_results[:6]]
     result['protocols']['HTTPS']={'ok':any(x['ok'] for x in https_probe_rows),'success':sum(x['ok'] for x in https_probe_rows),'total':len(https_probe_rows),'rtt':statistics.median([x['rtt'] for x in https_probe_rows if x['rtt'] is not None]) if any(x['rtt'] for x in https_probe_rows) else None,'loss':100*sum(not x['ok'] for x in https_probe_rows)/len(https_probe_rows)}
 
-    result['ping']['ipv4']=_diag_ping(False)
-    result['ping']['ipv6']=_diag_ping(True)
-    result['stacks']=_dual_stack_probe('www.cloudflare.com',443,1.5)
+    result['ping']['ipv4']=_diag_waiting('IPv4 ping', _diag_ping, False)
+    result['ping']['ipv6']=_diag_waiting('IPv6 ping', _diag_ping, True)
+    result['stacks']=_diag_waiting('IPv4 / IPv6 stack', _dual_stack_probe, 'www.cloudflare.com', 443, 1.5)
 
-    result['speed']=_diag_speed()
+    result['speed']=_diag_waiting('Speed test', _diag_speed)
     # Weighted diagnostic score; unavailable metrics are excluded rather than treated as zero.
     components=[]
     proto_scores=[]
@@ -2789,10 +2984,10 @@ def menu():
         print()
         ui_header(state)
         ui_choice([
-            ("1","CDN — Railway / Cloudflare / Fastly / Amazon CloudFront"),
+            ("1","CDN"),
             ("2","Advanced"),
-            ("3","Connect — Aether / Xray"),
-            ("4","Diag — full internet diagnostics"),
+            ("3","Connect"),
+            ("4","Diag"),
             ("5","Settings"),
             ("6","Remove"),
             ("7","Contact Me"),
@@ -2807,7 +3002,7 @@ def menu():
             elif c=="6": remove_menu(state)
             elif c=="7": contact_menu(state)
             elif c=="0":
-                stop_background_process('aether'); stop_background_process('xray')
+                stop_background_process('aether'); stop_background_process('xray'); stop_background_process('sni-spoof-proxy')
                 ui_clear(); print("Goodbye."); return
         except KeyboardInterrupt:
             print("\nInterrupted."); ui_pause()

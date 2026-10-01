@@ -232,12 +232,16 @@ cp -R "$SCRIPT_DIR/." "$PREFIX.new/"
 rm -rf "$PREFIX"
 mv "$PREFIX.new" "$PREFIX"
 
-# Ensure bundled connect components are present. Xray and Aether are supplied as prebuilt Linux x86_64 binaries.
+# Ensure bundled connect components are executable.
+# Aether is launched through ./aether.sh; SNI Spoof uses a local Python relay.
 if [ -f "$PREFIX/connect/xray/xray" ]; then chmod +x "$PREFIX/connect/xray/xray" || true; fi
-if [ -x "$PREFIX/connect/aether/aether" ]; then
-  say "[i] Bundled prebuilt Aether detected. No compilation is required on first run."
+if [ -f "$PREFIX/connect/aether/aether" ]; then chmod +x "$PREFIX/connect/aether/aether" || true; fi
+if [ -f "$PREFIX/connect/aether/aether.sh" ]; then chmod +x "$PREFIX/connect/aether/aether.sh" || true; fi
+if [ -f "$PREFIX/connect/sni-spoof/spoof_proxy.py" ]; then chmod +x "$PREFIX/connect/sni-spoof/spoof_proxy.py" || true; fi
+if [ -x "$PREFIX/connect/aether/aether" ] && [ -x "$PREFIX/connect/aether/aether.sh" ]; then
+  say "[i] Bundled Aether launcher detected (./aether.sh)."
 else
-  warn "Bundled Aether binary is missing from this Spider package."
+  warn "Bundled Aether launcher or binary is missing from this Spider package."
 fi
 
 # If the source copy contains an up-to-date bundled data file, keep it. Otherwise attempt GitHub.

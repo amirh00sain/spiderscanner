@@ -23,4 +23,4 @@ Runs bounded tests for TCP, UDP/DNS, HTTP, HTTPS, IPv4, IPv6, latency, packet lo
 
 
 ### Aether binary
-The Connect → Aether integration uses the bundled prebuilt Linux x86_64 distribution at `connect/aether/aether`, with optional PT helpers under `connect/aether/pt/`. Installation does not compile Aether.
+The Connect → Aether integration executes the bundled `./aether.sh` launcher from `connect/aether/`, which starts the prebuilt Linux x86_64 Aether binary with the configured MASQUE settings.

@@ -1,19 +1,22 @@
 # Spider SNI Spoof connector
 
-This directory bundles the user-provided `SNI-Spoofing` source under `upstream/SNI-Spoofing-main/` for reference and traceability.
+`Connect → SNI Spoof` uses the bundled Xray core plus a tiny local TCP/UDP relay.
 
-Spider's Linux implementation does **not** execute the upstream WinDivert packet injector. Instead, `CONNECT → SNI Spoof` uses the bundled Xray binary and changes the outbound transport so that:
+Runtime path:
 
-- the proxy protocol/authentication from the user's config is preserved;
-- the remote server address is replaced with the selected IP;
-- TLS `serverName` is replaced with the selected fake SNI;
-- when possible, Xray's `verifyPeerCertByName` keeps certificate verification tied to the original hostname;
-- REALITY configs keep their existing keys and replace only `realitySettings.serverName`.
+```text
+Xray → 127.0.0.1:40443 → selected target IP:original-port
+                    ↳ Xray TLS/REALITY ClientHello carries the fake SNI
+```
 
-## Auto mode
+For an active connection the generated Xray runtime config therefore uses:
 
-`data/cf_subnets.txt` supplies ordered IPv4 candidates and `data/sni-list.txt` supplies ordered SNI candidates. Spider creates bounded Xray probe batches, tests each pair through a local SOCKS adapter, and stores the first successful pair in `~/.spider/config.json` as `sni_spoof_last_find` (only the IP/SNI metadata is persisted, not the user's proxy credentials).
+- `server/address`: `127.0.0.1`
+- `server port`: `40443`
+- TLS/REALITY `serverName`: the requested fake SNI
+- relay target: the selected spoof IP and the original proxy port
 
-## Last Find
+The relay forwards the encrypted byte stream without terminating TLS. This keeps Xray responsible for the protocol/authentication handshake while the selected target IP is reached through the fixed local endpoint.
 
-The `Last Find` menu item is only displayed after Auto mode has stored a successful result. It reuses that IP/SNI pair with the new config supplied by the user.
+Auto scanning still probes candidate IP/SNI pairs with temporary direct Xray endpoints. Once a pair is selected, the active connection always switches to `127.0.0.1:40443`.
+
