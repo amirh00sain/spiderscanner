@@ -25,26 +25,5 @@
     "speed": 15.0,
     "reliability": 10.0,
     "service": 10.0
-  },
-  "cdn_max_candidates": 20000,
-  "lan_share_proxy": false,
-  "xray_tun_name": "spider-tun0",
-  "xray_tun_mtu": 1500,
-  "xray_ping_providers": [
-    {
-      "name": "Cloudflare",
-      "host": "1.1.1.1",
-      "port": 443
-    },
-    {
-      "name": "Google",
-      "host": "8.8.8.8",
-      "port": 443
-    },
-    {
-      "name": "Quad9",
-      "host": "9.9.9.9",
-      "port": 443
-    }
-  ]
+  }
 }

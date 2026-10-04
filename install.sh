@@ -53,15 +53,6 @@ run_root() {
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-
-install_aether_build_deps() {
-  [ "${SPIDER_SKIP_AETHER_DEPS:-0}" = "1" ] && return 0
-  # Aether is shipped as a prebuilt Linux x86_64 bundle (binary + PT helpers).
-  # No Rust/Cargo/CMake toolchain is needed for normal installation anymore.
-  say "[i] Using bundled prebuilt Aether (Linux x86_64); no build toolchain required."
-}
-
-
 install_system_packages() {
   # Returns success even when optional package installation cannot be completed;
   # the dependency verification below decides whether the install can continue.
@@ -222,8 +213,6 @@ if ! "$PYTHON_BIN" -c 'import rich' >/dev/null 2>&1; then
   ensure_python_package rich 'rich>=13.9,<16' || warn "Rich could not be installed; Spider will use its built-in plain-terminal fallback."
 fi
 
-install_aether_build_deps
-
 say "[3/5] Copying Spider application ..."
 mkdir -p "$PREFIX" "$BIN_DIR"
 rm -rf "$PREFIX.new"
@@ -231,18 +220,6 @@ mkdir -p "$PREFIX.new"
 cp -R "$SCRIPT_DIR/." "$PREFIX.new/"
 rm -rf "$PREFIX"
 mv "$PREFIX.new" "$PREFIX"
-
-# Ensure bundled connect components are executable.
-# Aether is launched through ./aether.sh; SNI Spoof uses a local Python relay.
-if [ -f "$PREFIX/connect/xray/xray" ]; then chmod +x "$PREFIX/connect/xray/xray" || true; fi
-if [ -f "$PREFIX/connect/aether/aether" ]; then chmod +x "$PREFIX/connect/aether/aether" || true; fi
-if [ -f "$PREFIX/connect/aether/aether.sh" ]; then chmod +x "$PREFIX/connect/aether/aether.sh" || true; fi
-if [ -f "$PREFIX/connect/sni-spoof/spoof_proxy.py" ]; then chmod +x "$PREFIX/connect/sni-spoof/spoof_proxy.py" || true; fi
-if [ -x "$PREFIX/connect/aether/aether" ] && [ -x "$PREFIX/connect/aether/aether.sh" ]; then
-  say "[i] Bundled Aether launcher detected (./aether.sh)."
-else
-  warn "Bundled Aether launcher or binary is missing from this Spider package."
-fi
 
 # If the source copy contains an up-to-date bundled data file, keep it. Otherwise attempt GitHub.
 mkdir -p "$PREFIX/data"
